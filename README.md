@@ -8,8 +8,8 @@ Neural style transfer is an exciting application of deep learning where a model 
 •	Creating new visual content for media
 # Example 
 **Content Image:**
-![Alt text](hoovertowernight.jpg)
-<img src="hoovertowernight.jpg" width="400" />
+![Alt text]([hoovertowernight.jpg](https://github.com/SheldonChetty/PRODIGY_GA_05/assets/118753773/2a549808-9544-485f-ab18-6e6c6cd93261))
+<img src="[hoovertowernight.jpg](https://github.com/SheldonChetty/PRODIGY_GA_05/assets/118753773/2a549808-9544-485f-ab18-6e6c6cd93261)" width="400" />
 ![hoovertowernight](https://github.com/SheldonChetty/PRODIGY_GA_05/assets/118753773/2a549808-9544-485f-ab18-6e6c6cd93261)
 
 **Style Image:**
