@@ -6,10 +6,6 @@ import numpy as np
 import PIL.Image
 import time
 
-# Set up matplotlib parameters
-mpl.rcParams['figure.figsize'] = (12, 12)
-mpl.rcParams['axes.grid'] = False
-
 # Function to convert a tensor to an image
 def tensor_to_image(tensor):
     tensor = tensor * 255  # Scale the tensor values to 0-255
@@ -20,12 +16,12 @@ def tensor_to_image(tensor):
     return PIL.Image.fromarray(tensor)  # Convert the numpy array to an image
 
 # Load images from local files
-content_path = 'content_image.jpg'
-style_path = 'style_image.jpg'
+content_path = 'tubingen.jpg'
+style_path = 'seated-nude.jpg'
 
 # Function to load and preprocess an image
 def load_img(path_to_img):
-    max_dim = 512  # Maximum dimension for the image
+    max_dim = 256  # Maximum dimension for the image
     img = tf.io.read_file(path_to_img)  # Read the image file
     img = tf.image.decode_image(img, channels=3)  # Decode the image
     img = tf.image.convert_image_dtype(img, tf.float32)  # Convert the image to float32 type
@@ -38,7 +34,8 @@ def load_img(path_to_img):
     return img  # Return the preprocessed image
 
 # Function to display an image
-def imshow(image, title=None):
+def imshow(image, title=None, figsize=(12, 12)):
+    plt.figure(figsize=figsize)
     if len(image.shape) > 3:  # If the image has more than 3 dimensions
         image = tf.squeeze(image, axis=0)  # Remove the batch dimension
     plt.imshow(image)  # Display the image
@@ -46,16 +43,14 @@ def imshow(image, title=None):
         plt.title(title)  # Set the title
     plt.axis('off')  # Turn off the axis
     plt.show()  # Show the image
+    plt.close()  # Close the figure to avoid the blank white screen
 
 # Load and display the content and style images
 content_image = load_img(content_path)
 style_image = load_img(style_path)
 
-plt.subplot(1, 2, 1)
-imshow(content_image, 'Content Image')
-
-plt.subplot(1, 2, 2)
-imshow(style_image, 'Style Image')
+imshow(content_image, 'Content Image', figsize=(6, 6))
+imshow(style_image, 'Style Image', figsize=(6, 6))
 
 # Load the VGG19 model
 vgg = tf.keras.applications.VGG19(include_top=False, weights='imagenet')
@@ -178,30 +173,27 @@ def train_step(image):
         loss += total_variation_weight * tf.image.total_variation(image)  # Add total variation loss
     grad = tape.gradient(loss, image)  # Compute gradients
     opt.apply_gradients([(grad, image)])  # Apply gradients
-    image.assign(tf.clip_by_value(image, clip_value_min=0.0, clip_value_max=1.0))  # Clip image values to [0, 1]
+    image.assign(tf.clip_by_value(image, clip_value_min=0.0, clip_value_max=1.0))  # Clip the image values
+    return loss
 
-# Training parameters
+# Train the model
+start = time.time()
 epochs = 10
 steps_per_epoch = 100
-step = 0
 
-# Training loop
-start = time.time()  # Start time
 for n in range(epochs):
     for m in range(steps_per_epoch):
-        step += 1  # Increment step count
-        train_step(image)  # Perform a training step
-        if step % 10 == 0:  # Every 10 steps
-            print(".", end='', flush=True)  # Print a dot
-            plt.figure(figsize=(12, 12))  # Create a new figure
-            imshow(image.numpy()[0], title="Train step: {}".format(step))  # Display the image with the step count
-            plt.axis('off')  # Turn off the axis
-            plt.show()  # Show the figure
+        train_step(image)
+        print('.', end='')
+    print('Train step: {}'.format(n * steps_per_epoch + m + 1))
 
-end = time.time()  # End time
-print("\nTotal time: {:.1f} seconds".format(end-start))  # Print total time
+end = time.time()
+print("Total time: {:.1f}".format(end - start))
 
-# Save the stylized image
-file_name = 'stylized-image.png'
-tensor_to_image(image).save(file_name)  # Save the image
-print("Stylized image saved as:", file_name)  # Print the file name
+# Display the resulting image
+imshow(image.numpy()[0], 'Resulting Image', figsize=(6, 6))
+
+# Convert the image to a PIL image and save it
+resulting_image = tensor_to_image(image)
+resulting_image.save('result.png')
+
