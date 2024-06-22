@@ -6,81 +6,128 @@ import numpy as np
 import PIL.Image
 import time
 
-# Function to convert a tensor to an image
-def tensor_to_image(tensor):
-    tensor = tensor * 255  # Scale the tensor values to 0-255
-    tensor = np.array(tensor, dtype=np.uint8)  # Convert tensor to numpy array
-    if np.ndim(tensor) > 3:  # If the tensor has more than 3 dimensions
-        assert tensor.shape[0] == 1  # Ensure the first dimension is 1
-        tensor = tensor[0]  # Remove the first dimension
-    return PIL.Image.fromarray(tensor)  # Convert the numpy array to an image
+# Function to convert a tensor to a PIL image.
+# It scales the tensor values to the 0-255 range, converts it to a numpy array, and then to a PIL image.
+def tensor_to_pil_image(tens):
+    tens = tens * 255
+    tens = np.array(tens, dtype=np.uint8)
+    if np.ndim(tens) > 3:
+        assert tens.shape[0] == 1
+        tens = tens[0]
+    return PIL.Image.fromarray(tens)
 
-# Load images from local files
-content_path = 'tubingen.jpg'
-style_path = 'seated-nude.jpg'
+# Function to compute the Gram matrix.
+# This is used in style transfer to capture the style of an image by computing the matrix using the einsum function and normalizing it.
+def compute_gram_matrix(tensor):
+    result = tf.linalg.einsum('bijc,bijd->bcd', tensor, tensor)
+    tensor_shape = tf.shape(tensor)
+    num_locations = tf.cast(tensor_shape[1] * tensor_shape[2], tf.float32)
+    return result / num_locations
 
-# Function to load and preprocess an image
-def load_img(path_to_img):
-    max_dim = 256  # Maximum dimension for the image
-    img = tf.io.read_file(path_to_img)  # Read the image file
-    img = tf.image.decode_image(img, channels=3)  # Decode the image
-    img = tf.image.convert_image_dtype(img, tf.float32)  # Convert the image to float32 type
-    shape = tf.cast(tf.shape(img)[:-1], tf.float32)  # Get the shape of the image
-    long_dim = max(shape)  # Get the longer dimension
-    scale = max_dim / long_dim  # Calculate the scale factor
-    new_shape = tf.cast(shape * scale, tf.int32)  # Calculate the new shape
-    img = tf.image.resize(img, new_shape)  # Resize the image
-    img = img[tf.newaxis, :]  # Add a batch dimension
-    return img  # Return the preprocessed image
+# Function to load and preprocess an image.
+# It reads the image file, decodes it, converts it to float32 type, resizes it while maintaining the aspect ratio, and adds a batch dimension.
+def load_and_preprocess_image(image_path):
+    max_dim = 256
+    img = tf.io.read_file(image_path)
+    img = tf.image.decode_image(img, channels=3)
+    img = tf.image.convert_image_dtype(img, tf.float32)
+    shape = tf.cast(tf.shape(img)[:-1], tf.float32)
+    long_dim = max(shape)
+    scale = max_dim / long_dim
+    new_shape = tf.cast(shape * scale, tf.int32)
+    img = tf.image.resize(img, new_shape)
+    img = img[tf.newaxis, :]
+    return img
 
-# Function to display an image
-def imshow(image, title=None, figsize=(12, 12)):
-    plt.figure(figsize=figsize)
-    if len(image.shape) > 3:  # If the image has more than 3 dimensions
-        image = tf.squeeze(image, axis=0)  # Remove the batch dimension
-    plt.imshow(image)  # Display the image
-    if title:  # If a title is provided
-        plt.title(title)  # Set the title
-    plt.axis('off')  # Turn off the axis
-    plt.show()  # Show the image
-    plt.close()  # Close the figure to avoid the blank white screen
+# Function to display an image using Matplotlib.
+# It optionally sets a title, removes the axis, and shows the image.
+def display_image(img, img_title=None, fig_size=(12, 12)):
+    plt.figure(figsize=fig_size)
+    if len(img.shape) > 3:
+        img = tf.squeeze(img, axis=0)
+    plt.imshow(img)
+    if img_title:
+        plt.title(img_title)
+    plt.axis('off')
+    plt.show()
+    plt.close()
 
-# Load and display the content and style images
-content_image = load_img(content_path)
-style_image = load_img(style_path)
+# Function to create a VGG model that returns a list of intermediate output values from the specified layers.
+def vgg_intermediate_layers(layer_list):
+    vgg = tf.keras.applications.VGG19(include_top=False, weights='imagenet')
+    vgg.trainable = False
+    outputs = [vgg.get_layer(name).output for name in layer_list]
+    model = tf.keras.Model([vgg.input], outputs)
+    return model
 
-imshow(content_image, 'Content Image', figsize=(6, 6))
-imshow(style_image, 'Style Image', figsize=(6, 6))
+# Class defining a custom model that extracts style and content features from specified layers of the VGG model.
+# It computes the Gram matrix for style layers and extracts the content directly from content layers.
+class StyleContentModel(tf.keras.models.Model):
+    def __init__(self, style_layers, content_layers):
+        super(StyleContentModel, self).__init__()
+        self.vgg = vgg_intermediate_layers(style_layers + content_layers)
+        self.style_layers = style_layers
+        self.content_layers = content_layers
+        self.num_style_layers = len(style_layers)
+        self.vgg.trainable = False
 
-# Load the VGG19 model
+    def call(self, inputs):
+        inputs = inputs * 255.0
+        preprocessed_input = tf.keras.applications.vgg19.preprocess_input(inputs)
+        outputs = self.vgg(preprocessed_input)
+        style_outputs, content_outputs = (outputs[:self.num_style_layers], outputs[self.num_style_layers:])
+        style_outputs = [compute_gram_matrix(style_output) for style_output in style_outputs]
+        content_dict = {content_name: value for content_name, value in zip(self.content_layers, content_outputs)}
+        style_dict = {style_name: value for style_name, value in zip(self.style_layers, style_outputs)}
+        return {'content': content_dict, 'style': style_dict}
+
+# Function to calculate the style and content loss.
+# It computes the mean squared error between the current outputs and the target outputs for both style and content, and then combines these losses with weights.
+def compute_style_content_loss(outputs, style_targets, content_targets, style_weight, content_weight, num_style_layers, num_content_layers):
+    style_outputs = outputs['style']
+    content_outputs = outputs['content']
+    style_loss = tf.add_n([tf.reduce_mean((style_outputs[name] - style_targets[name])**2) for name in style_outputs.keys()])
+    style_loss *= style_weight / num_style_layers
+    content_loss = tf.add_n([tf.reduce_mean((content_outputs[name] - content_targets[name])**2) for name in content_outputs.keys()])
+    content_loss *= content_weight / num_content_layers
+    total_loss = style_loss + content_loss
+    return total_loss
+
+# Function to perform one optimization step on the image.
+# It computes the gradients of the loss with respect to the image and updates the image using these gradients.
+@tf.function()
+def optimize_image_step(image, extractor, optimizer, style_targets, content_targets, style_weight, content_weight, num_style_layers, num_content_layers, tv_weight):
+    with tf.GradientTape() as tape:
+        outputs = extractor(image)
+        loss = compute_style_content_loss(outputs, style_targets, content_targets, style_weight, content_weight, num_style_layers, num_content_layers)
+        loss += tv_weight * tf.image.total_variation(image)
+    gradients = tape.gradient(loss, image)
+    optimizer.apply_gradients([(gradients, image)])
+    image.assign(tf.clip_by_value(image, clip_value_min=0.0, clip_value_max=1.0))
+    return loss
+
+# Load and preprocess the content and style images.
+content_image_path = 'tubingen.jpg'
+style_image_path = 'seated-nude.jpg'
+content_image = load_and_preprocess_image(content_image_path)
+style_image = load_and_preprocess_image(style_image_path)
+
+# Display the content and style images.
+display_image(content_image, 'Content Image', fig_size=(6, 6))
+display_image(style_image, 'Style Image', fig_size=(6, 6))
+
+# Define the VGG model and specify the layers to be used for style and content extraction.
 vgg = tf.keras.applications.VGG19(include_top=False, weights='imagenet')
-
-# Specify the content and style layers
 content_layers = ['block5_conv2']
-style_layers = [
-    'block1_conv1',
-    'block2_conv1',
-    'block3_conv1',
-    'block4_conv1',
-    'block5_conv1'
-]
-
+style_layers = ['block1_conv1', 'block2_conv1', 'block3_conv1', 'block4_conv1', 'block5_conv1']
 num_content_layers = len(content_layers)
 num_style_layers = len(style_layers)
 
-# Function to create a VGG model that returns a list of intermediate output values
-def vgg_layers(layer_names):
-    vgg = tf.keras.applications.VGG19(include_top=False, weights='imagenet')
-    vgg.trainable = False  # Set the model to non-trainable
-    outputs = [vgg.get_layer(name).output for name in layer_names]  # Get the outputs of the specified layers
-    model = tf.keras.Model([vgg.input], outputs)  # Create the model
-    return model  # Return the model
+# Extract style features from the style image using the specified layers.
+style_feature_extractor = vgg_intermediate_layers(style_layers)
+style_outputs = style_feature_extractor(style_image * 255.0)
 
-# Extract style and content features from the style image
-style_extractor = vgg_layers(style_layers)
-style_outputs = style_extractor(style_image * 255.0)  # Multiply by 255 to scale back to original range
-
-# Print the shape, min, max, and mean of each style layer output
+# Print the details of the extracted style features.
 for name, output in zip(style_layers, style_outputs):
     print(name)
     print("  shape: ", output.numpy().shape)
@@ -89,111 +136,37 @@ for name, output in zip(style_layers, style_outputs):
     print("  mean: ", output.numpy().mean())
     print()
 
-# Function to compute the Gram matrix
-def gram_matrix(input_tensor):
-    result = tf.linalg.einsum('bijc,bijd->bcd', input_tensor, input_tensor)  # Compute the Gram matrix
-    input_shape = tf.shape(input_tensor)
-    num_locations = tf.cast(input_shape[1] * input_shape[2], tf.float32)  # Calculate the number of locations
-    return result / num_locations  # Normalize the Gram matrix
-
-# Custom model to extract style and content features
-class StyleContentModel(tf.keras.models.Model):
-    def __init__(self, style_layers, content_layers):
-        super(StyleContentModel, self).__init__()
-        self.vgg = vgg_layers(style_layers + content_layers)  # Create the VGG model with the specified layers
-        self.style_layers = style_layers
-        self.content_layers = content_layers
-        self.num_style_layers = len(style_layers)
-        self.vgg.trainable = False  # Set the VGG model to non-trainable
-
-    def call(self, inputs):
-        inputs = inputs * 255.0  # Scale the inputs to the original range
-        preprocessed_input = tf.keras.applications.vgg19.preprocess_input(inputs)  # Preprocess the inputs
-        outputs = self.vgg(preprocessed_input)  # Get the outputs of the VGG model
-        style_outputs, content_outputs = (outputs[:self.num_style_layers], outputs[self.num_style_layers:])  # Split the outputs into style and content
-        style_outputs = [gram_matrix(style_output) for style_output in style_outputs]  # Compute the Gram matrix for each style output
-        content_dict = {content_name: value for content_name, value in zip(self.content_layers, content_outputs)}  # Create a dictionary of content outputs
-        style_dict = {style_name: value for style_name, value in zip(self.style_layers, style_outputs)}  # Create a dictionary of style outputs
-        return {'content': content_dict, 'style': style_dict}  # Return the dictionaries
-
-# Create an instance of the custom model
+# Create an instance of the custom model to extract style and content features from the specified layers.
 extractor = StyleContentModel(style_layers, content_layers)
-
-# Extract style and content features from the content image
-results = extractor(content_image)
-
-# Print the shape, min, max, and mean of each style and content output
-print('Styles:')
-for name, output in sorted(results['style'].items()):
-    print("  ", name)
-    print("    shape: ", output.numpy().shape)
-    print("    min: ", output.numpy().min())
-    print("    max: ", output.numpy().max())
-    print("    mean: ", output.numpy().mean())
-    print()
-
-print("Contents:")
-for name, output in sorted(results['content'].items()):
-    print("  ", name)
-    print("    shape: ", output.numpy().shape)
-    print("    min: ", output.numpy().min())
-    print("    max: ", output.numpy().max())
-    print("    mean: ", output.numpy().mean())
-
-# Extract style and content targets from the style and content images
 style_targets = extractor(style_image)['style']
 content_targets = extractor(content_image)['content']
 
-# Initialize the image variable for optimization
-image = tf.Variable(content_image)
+# Initialize the image to be optimized with the content image.
+optimized_image = tf.Variable(content_image)
 
-# Define optimization parameters
-opt = tf.keras.optimizers.Adam(learning_rate=0.02, beta_1=0.99, epsilon=1e-1)
-style_weight = 1e-2
-content_weight = 1e4
-total_variation_weight = 30
+# Define the optimizer and loss weights.
+optimizer = tf.keras.optimizers.Adam(learning_rate=0.02, beta_1=0.99, epsilon=1e-1)
+style_loss_weight = 1e-2
+content_loss_weight = 1e4
+tv_loss_weight = 30
 
-# Define the style content loss function
-def style_content_loss(outputs):
-    style_outputs = outputs['style']
-    content_outputs = outputs['content']
-    style_loss = tf.add_n([tf.reduce_mean((style_outputs[name] - style_targets[name])**2) for name in style_outputs.keys()])  # Compute style loss
-    style_loss *= style_weight / num_style_layers  # Scale style loss
-    content_loss = tf.add_n([tf.reduce_mean((content_outputs[name] - content_targets[name])**2) for name in content_outputs.keys()])  # Compute content loss
-    content_loss *= content_weight / num_content_layers  # Scale content loss
-    loss = style_loss + content_loss  # Total loss
-    return loss
+# Train the model for a specified number of epochs and steps per epoch.
+start_time = time.time()
+epochs_count = 10
+steps_per_epoch_count = 100
 
-# Define the training step function
-@tf.function()
-def train_step(image):
-    with tf.GradientTape() as tape:
-        outputs = extractor(image)  # Extract features from the image
-        loss = style_content_loss(outputs)  # Compute the loss
-        loss += total_variation_weight * tf.image.total_variation(image)  # Add total variation loss
-    grad = tape.gradient(loss, image)  # Compute gradients
-    opt.apply_gradients([(grad, image)])  # Apply gradients
-    image.assign(tf.clip_by_value(image, clip_value_min=0.0, clip_value_max=1.0))  # Clip the image values
-    return loss
-
-# Train the model
-start = time.time()
-epochs = 10
-steps_per_epoch = 100
-
-for n in range(epochs):
-    for m in range(steps_per_epoch):
-        train_step(image)
+for epoch in range(epochs_count):
+    for step in range(steps_per_epoch_count):
+        optimize_image_step(optimized_image, extractor, optimizer, style_targets, content_targets, style_loss_weight, content_loss_weight, num_style_layers, num_content_layers, tv_loss_weight)
         print('.', end='')
-    print('Train step: {}'.format(n * steps_per_epoch + m + 1))
+    print('Train step: {}'.format(epoch * steps_per_epoch_count + step + 1))
 
-end = time.time()
-print("Total time: {:.1f}".format(end - start))
+end_time = time.time()
+print("Total time: {:.1f}".format(end_time - start_time))
 
-# Display the resulting image
-imshow(image.numpy()[0], 'Resulting Image', figsize=(6, 6))
+# Display the resulting image.
+display_image(optimized_image.numpy()[0], 'Resulting Image', fig_size=(6, 6))
 
-# Convert the image to a PIL image and save it
-resulting_image = tensor_to_image(image)
-resulting_image.save('result.png')
-
+# Convert the final optimized image to a PIL image and save it.
+final_image = tensor_to_pil_image(optimized_image)
+final_image.save('result.png')
